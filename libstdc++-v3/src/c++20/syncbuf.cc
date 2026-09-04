@@ -25,6 +25,7 @@
 #include <syncstream>
 #include <mutex>
 #include <bits/functional_hash.h>
+#include <bits/std_mutex.h>
 
 #if _GLIBCXX_HAS_GTHREADS
 namespace std _GLIBCXX_VISIBILITY(default)
