@@ -1,0 +1,156 @@
+# Cross-build validation for the aarch64-pc-cygwin patch series.
+#
+# NOT FOR UPSTREAM SUBMISSION.  This workflow exists only to validate the
+# series on the working branch and is dropped before the patches are sent
+# to gcc-patches.
+#
+# It builds a cross compiler for the Cygwin targets and uploads the
+# generated files, so that the "no functional change" claim of the
+# config/cygwin move can be checked by diffing the x86 artifacts against
+# a run of the same workflow on unpatched trunk.
+
+name: cygwin cross build
+
+on:
+  push:
+    branches:
+      - aarch64-cygwin-trunk
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cross:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-26.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          # The new target this series adds.
+          - aarch64-pc-cygwin
+          # Regression check: the config/cygwin move must not disturb the
+          # existing Cygwin targets.
+          - x86_64-pc-cygwin
+    env:
+      BINUTILS_REPO: https://github.com/dennisameling/binutils-gdb.git
+      BINUTILS_REF: aarch64-pc-cygwin
+      PREFIX: ${{ github.workspace }}/toolchain
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 1500M
+
+    steps:
+      - name: Check out GCC
+        uses: actions/checkout@v7
+        with:
+          path: gcc
+          fetch-depth: 10
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache flex bison texinfo \
+            libgmp-dev libmpfr-dev libmpc-dev zlib1g-dev
+
+      - name: Resolve binutils revision
+        id: binutils
+        run: |
+          sha=$(git ls-remote "$BINUTILS_REPO" "refs/heads/$BINUTILS_REF" | cut -f1)
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Pinning binutils to $sha"
+
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.target }}-
+
+      - name: Cache target binutils
+        id: binutils-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.PREFIX }}
+          key: binutils-${{ matrix.target }}-${{ steps.binutils.outputs.sha }}
+
+      - name: Build target binutils
+        if: steps.binutils-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 --branch "$BINUTILS_REF" "$BINUTILS_REPO" binutils-src
+          mkdir binutils-build
+          cd binutils-build
+          ../binutils-src/configure \
+            --target=${{ matrix.target }} \
+            --prefix="$PREFIX" \
+            --disable-nls --disable-werror --disable-sim \
+            --disable-gdb --disable-gdbserver \
+            CC="ccache gcc" CXX="ccache g++"
+          make -j"$(nproc)"
+          make install
+
+      - name: Configure GCC
+        run: |
+          # Only $PREFIX/bin goes on PATH.  $PREFIX/$target/bin holds
+          # unprefixed as/ld which would shadow the host assembler and
+          # break the build tools.
+          export PATH="$PREFIX/bin:$PATH"
+          mkdir gcc-build
+          cd gcc-build
+          ../gcc/configure \
+            --target=${{ matrix.target }} \
+            --prefix="$PREFIX" \
+            --enable-languages=c,c++ \
+            --disable-bootstrap --disable-multilib --disable-nls \
+            CC="ccache gcc" CXX="ccache g++"
+
+      - name: Build the compiler
+        run: |
+          export PATH="$PREFIX/bin:$PATH"
+          make -C gcc-build -j"$(nproc)" all-gcc
+
+      - name: Collect generated files
+        if: always()
+        run: |
+          set +e
+          mkdir -p generated
+          B=gcc-build/gcc
+
+          {
+            echo "target:   ${{ matrix.target }}"
+            echo "gcc:      $(git -C gcc rev-parse HEAD)"
+            echo "binutils: ${{ steps.binutils.outputs.sha }}"
+            echo "runner:   $(uname -srm)"
+          } > generated/REVISIONS.txt
+
+          git -C gcc log --oneline -8 > generated/COMMITS.txt
+
+          for f in tm.h tm_p.h auto-host.h optionlist; do
+            cp "$B/$f" "generated/$f" 2>/dev/null
+          done
+
+          if [ -x "$B/xgcc" ]; then
+            "$B/xgcc" -B"$B/" -dumpspecs          > generated/specs.txt          2>&1
+            "$B/xgcc" -B"$B/" -dM -E -x c   /dev/null > generated/predefines-c.txt   2>&1
+            "$B/xgcc" -B"$B/" -dM -E -x c++ /dev/null > generated/predefines-cxx.txt 2>&1
+            "$B/xgcc" -B"$B/" -v                  > generated/xgcc-v.txt         2>&1
+          fi
+
+          cp "$B/config.log" generated/gcc-config.log 2>/dev/null
+          ls -la generated/
+          exit 0
+
+      - name: Upload generated files
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: generated-${{ matrix.target }}
+          path: generated/
+          if-no-files-found: warn
+
+      - name: ccache statistics
+        if: always()
+        run: ccache -s

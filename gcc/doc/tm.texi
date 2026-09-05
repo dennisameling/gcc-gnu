@@ -10910,7 +10910,7 @@ will then define a function called
 the expansion of @code{TARGET_MERGE_DECL_ATTRIBUTES}.  You can also
 add @code{handle_dll_attribute} in the attribute table for your port
 to perform initial processing of the @samp{dllimport} and
-@samp{dllexport} attributes.  This is done in @file{i386/cygwin.h} and
+@samp{dllexport} attributes.  This is done in @file{cygwin/cygwin.h} and
 @file{i386/i386.cc}, for example.
 @end deftypefn
 

@@ -2247,7 +2247,7 @@ will then define a function called\n\
 the expansion of @code{TARGET_MERGE_DECL_ATTRIBUTES}.  You can also\n\
 add @code{handle_dll_attribute} in the attribute table for your port\n\
 to perform initial processing of the @samp{dllimport} and\n\
-@samp{dllexport} attributes.  This is done in @file{i386/cygwin.h} and\n\
+@samp{dllexport} attributes.  This is done in @file{cygwin/cygwin.h} and\n\
 @file{i386/i386.cc}, for example.",
  tree, (tree olddecl, tree newdecl),
  merge_decl_attributes)
