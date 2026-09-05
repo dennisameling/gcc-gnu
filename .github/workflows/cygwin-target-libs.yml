@@ -1,21 +1,19 @@
-# Cold bootstrap of the aarch64-pc-cygwin target libraries.
+# Cold bootstrap of the aarch64-pc-cygwin target libraries, driven by the
+# upstream Windows-on-Arm build system rather than a hand-rolled sequence.
 #
 # NOT FOR UPSTREAM SUBMISSION.
 #
-# The sibling cygwin-cross workflow stops at "make all-gcc", which never
-# touches libgcc or libstdc++ and so never exercises the libgcc/config.host
-# hunk in the "Add aarch64-pc-cygwin target" patch.  This workflow does the
-# full cross bootstrap from nothing:
+# The sibling cygwin-cross workflow stops at "make all-gcc", so it never
+# compiles a target object and never exercises the libgcc/config.host hunk
+# in the "Add aarch64-pc-cygwin target" patch, which is where two real bugs
+# were found by hand.
 #
-#   1. binutils for the target
-#   2. GCC stage 1 (compiler only, no target libraries)
-#   3. Cygwin, cross-bootstrap mode, to lay down headers and libcygwin
-#   4. libgcc, the first real test of the config.host hunk
-#   5. Cygwin again, now that libgcc exists, for a complete cygwin1.dll
-#   6. libstdc++
-#
-# Every local build so far reused a sysroot from the older GCC 15 stack, so
-# this is the first genuinely cold bootstrap of the series.
+# Rather than reimplement the bootstrap, run
+# Windows-on-ARM-Experiments/mingw-woarm64-build, which is the pipeline that
+# produced the known-good toolchain, and override only the two sources under
+# test.  GCC and binutils come from this fork's branches; mingw-w64 and
+# Cygwin keep their known-good upstream pins, so a green run is evidence
+# about the GCC and binutils patches specifically.
 
 name: cygwin target libraries
 
@@ -34,218 +32,89 @@ concurrency:
 
 jobs:
   bootstrap:
-    name: aarch64-pc-cygwin target libraries
+    name: aarch64-pc-cygwin toolchain
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 330
     env:
-      TARGET: aarch64-pc-cygwin
-      BINUTILS_REPO: https://github.com/dennisameling/binutils-gdb.git
-      BINUTILS_REF: aarch64-pc-cygwin
-      CYGWIN_REPO: https://github.com/eukarpov/cygwin-windows-arm64.git
-      CYGWIN_REF: woarm64
-      MINGW_REPO: https://github.com/Windows-on-ARM-Experiments/mingw-woarm64.git
-      MINGW_REF: woarm64
-      PREFIX: ${{ github.workspace }}/toolchain
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: 2G
+      # Target selection.
+      ARCH: aarch64
+      PLATFORM: pc-cygwin
+      CRT: msvcrt
+
+      # The two things under test.
+      GCC_REPO: dennisameling/gcc-gnu
+      GCC_BRANCH: aarch64-cygwin-trunk
+      BINUTILS_REPO: dennisameling/binutils-gdb
+      BINUTILS_BRANCH: aarch64-pc-cygwin
+      # MINGW_REPO and CYGWIN_REPO deliberately left at their defaults.
+
+      # Build-system behaviour.
+      RUN_BOOTSTRAP: 1      # install apt dependencies
+      UPDATE_SOURCES: 1     # clone the source repositories
+      REBASE_SOURCES: 0     # our branches sit on GNU trunk, not on woarm64
+      FLAT_CLONE: 1
+      CCACHE: 1
+      DELETE_BUILD: 1       # runners only have ~14 GB of disk
 
     steps:
-      - name: Check out GCC
+      - name: Check out the build system
         uses: actions/checkout@v7
         with:
-          path: gcc
-          fetch-depth: 10
+          repository: Windows-on-ARM-Experiments/mingw-woarm64-build
+          path: build-system
+          fetch-depth: 1
 
-      - name: Show disk before
-        run: df -h / | tail -1
-
-      - name: Install build dependencies
+      - name: Free up disk space
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential ccache flex bison texinfo gperf \
-            libgmp-dev libmpfr-dev libmpc-dev zlib1g-dev \
-            autoconf automake libtool patch xz-utils perl
-
-      - name: Resolve source revisions
-        id: rev
-        run: |
-          bu=$(git ls-remote "$BINUTILS_REPO" "refs/heads/$BINUTILS_REF" | cut -f1)
-          cy=$(git ls-remote "$CYGWIN_REPO"  "refs/heads/$CYGWIN_REF"  | cut -f1)
-          test -n "$bu" && test -n "$cy"
-          echo "binutils=$bu" >> "$GITHUB_OUTPUT"
-          echo "cygwin=$cy"   >> "$GITHUB_OUTPUT"
-          echo "binutils $bu"
-          echo "cygwin   $cy"
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+          df -h / | tail -1
 
       - name: Restore ccache
         uses: actions/cache@v6
         with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ccache-libs-${{ github.sha }}
+          path: build-system/ccache
+          key: woarm64-ccache-${{ github.sha }}
           restore-keys: |
-            ccache-libs-
+            woarm64-ccache-
 
-      - name: 1. Build binutils
+      - name: Report the sources under test
         run: |
-          # Deliberately not cached.  Caching $PREFIX would persist the whole
-          # evolving sysroot between runs and make the bootstrap non-hermetic;
-          # ccache already makes the recompile cheap.
-          git clone --depth=1 --branch "$BINUTILS_REF" "$BINUTILS_REPO" binutils-src
-          mkdir binutils-build && cd binutils-build
-          ../binutils-src/configure --target="$TARGET" --prefix="$PREFIX" \
-            --disable-nls --disable-werror --disable-sim \
-            --disable-gdb --disable-gdbserver \
-            CC="ccache gcc" CXX="ccache g++"
-          make -j"$(nproc)"
-          make install
+          echo "gcc:      $GCC_REPO@$GCC_BRANCH      $(git ls-remote https://github.com/$GCC_REPO.git refs/heads/$GCC_BRANCH | cut -f1)"
+          echo "binutils: $BINUTILS_REPO@$BINUTILS_BRANCH  $(git ls-remote https://github.com/$BINUTILS_REPO.git refs/heads/$BINUTILS_BRANCH | cut -f1)"
 
-      - name: 2. MinGW-w64 headers (w32api)
-        run: |
-          export PATH="$PREFIX/bin:$PATH"
-          git clone --depth=1 --branch "$MINGW_REF" "$MINGW_REPO" mingw-src
-          mkdir mingw-headers-build && cd mingw-headers-build
-          ../mingw-src/mingw-w64-headers/configure \
-            --prefix="$PREFIX/$TARGET" \
-            --build="$(../mingw-src/mingw-w64-headers/config.guess 2>/dev/null || gcc -dumpmachine)" \
-            --host="$TARGET" \
-            --enable-sdk=all --enable-w32api
-          make -j"$(nproc)" && make install
-          test -f "$PREFIX/$TARGET/include/windows.h" \
-            || test -f "$PREFIX/$TARGET/include/w32api/windows.h" \
-            || { echo "windows.h not installed"; exit 1; }
-
-      - name: 3. Cygwin headers
-        run: |
-          git clone --depth=1 --branch "$CYGWIN_REF" "$CYGWIN_REPO" cygwin-src
-          mkdir -p "$PREFIX/$TARGET/include"
-          cp -r cygwin-src/newlib/libc/include/*      "$PREFIX/$TARGET/include/"
-          cp -r cygwin-src/winsup/cygwin/include/*    "$PREFIX/$TARGET/include/"
-          test -f "$PREFIX/$TARGET/include/cygwin/config.h"
-          echo "headers in sysroot: $(find "$PREFIX/$TARGET/include" -name '*.h' | wc -l)"
-
-      - name: 4. GCC stage 1 (compiler only, --without-headers)
-        run: |
-          export PATH="$PREFIX/bin:$PATH"
-          mkdir gcc-stage1 && cd gcc-stage1
-          ../gcc/configure \
-            --target="$TARGET" --prefix="$PREFIX" \
-            --enable-languages=c,c++ \
-            --enable-static --disable-shared --disable-bootstrap --disable-multilib \
-            --disable-plugins --disable-gcov --disable-libatomic --disable-libgomp \
-            --disable-libvtv --disable-libquadmath --disable-libssp --disable-nls \
-            --with-gnu-as --with-gnu-ld --without-headers \
-            CC="ccache gcc" CXX="ccache g++"
-          make -j"$(nproc)" all-gcc
-          make install-gcc
-
-      - name: 5. MinGW-w64 CRT
-        run: |
-          export PATH="$PREFIX/bin:$PATH"
-          mkdir mingw-crt-build && cd mingw-crt-build
-          # --enable-w32api is required here as well as for the headers: with it
-          # the headers land in include/w32api, and without it the CRT build
-          # cannot find direct.h and friends.  The arm64 lib selection and the
-          # msvcrt default mirror the mingw-woarm64 build scripts.
-          ../mingw-src/mingw-w64-crt/configure \
-            --prefix="$PREFIX/$TARGET" \
-            --build="$(gcc -dumpmachine)" \
-            --host="$TARGET" \
-            --disable-lib32 --disable-lib64 --disable-libarm32 --enable-libarm64 \
-            --enable-w32api \
-            --with-default-msvcrt=msvcrt
-          make -j"$(nproc)"
-          make install
-          # Cygwin expects the w32api import libraries visible directly in
-          # $TARGET/lib, not only under w32api/.
-          cd "$PREFIX/$TARGET/lib"
-          for l in kernel32 user32 advapi32 shell32 gdi32 comdlg32 ntdll \
-                   netapi32 psapi userenv dbghelp onecore pdh winmm; do
-            [ -f "w32api/lib$l.a" ] && ln -fs "w32api/lib$l.a" . || true
-          done
-          ls -1 lib*.a 2>/dev/null | head -10
-
-      - name: 6. Cygwin, stage 1
-        run: |
-          export PATH="$PREFIX/bin:$PATH"
-          mkdir cygwin-build && cd cygwin-build
-          ../cygwin-src/configure \
-            --prefix="$PREFIX" \
-            --build="$(gcc -dumpmachine)" --host="$(gcc -dumpmachine)" --target="$TARGET" \
-            --enable-shared --enable-static --disable-doc --disable-dumper \
-            --with-sysroot="$PREFIX" --with-build-sysroot="$PREFIX" \
-            --with-cross-bootstrap --disable-cygserver --disable-utils
-          make -j"$(nproc)" CFLAGS_FOR_TARGET="-Wno-error" \
-            CXXFLAGS_FOR_TARGET="-Wno-error -Wno-narrowing -std=gnu++17"
-          make install
-
-      - name: 7. Full GCC (libgcc and libstdc++)
-        run: |
-          export PATH="$PREFIX/bin:$PATH"
-          mkdir gcc-build && cd gcc-build
-          ../gcc/configure \
-            --target="$TARGET" --prefix="$PREFIX" \
-            --enable-languages=c,c++ \
-            --disable-bootstrap --disable-multilib --disable-nls \
-            --enable-threads=posix --disable-shared \
-            --with-gnu-as --with-gnu-ld \
-            CC="ccache gcc" CXX="ccache g++"
-          make -j"$(nproc)" all-target-libgcc
-          make install-target-libgcc
-          make -j"$(nproc)" all-target-libstdc++-v3
-          make install-target-libstdc++-v3
+      - name: Build the toolchain
+        run: ./build-system/.github/scripts/build.sh
 
       - name: Collect results
         if: always()
         run: |
           set +e
-          mkdir -p out/logs out/libs
+          TC="$HOME/cross-${ARCH}-${PLATFORM}-${CRT}"
+          T="${ARCH}-${PLATFORM}"
+          mkdir -p out/logs
           {
-            echo "target:   $TARGET"
-            echo "gcc:      $(git -C gcc rev-parse HEAD)"
-            echo "binutils: ${{ steps.rev.outputs.binutils }}"
-            echo "cygwin:   ${{ steps.rev.outputs.cygwin }}"
-            echo "runner:   $(uname -srm)"
-          } > out/REVISIONS.txt
-          git -C gcc log --oneline -10 > out/COMMITS.txt
-
-          NM="$PREFIX/bin/$TARGET-nm"
-          OD="$PREFIX/bin/$TARGET-objdump"
-          {
+            echo "target:   $T"
+            echo "gcc:      $GCC_REPO@$GCC_BRANCH"
+            echo "binutils: $BINUTILS_REPO@$BINUTILS_BRANCH"
+            echo "prefix:   $TC"
+            echo
             echo "=== artefacts ==="
-            for f in \
-              "$PREFIX"/lib/gcc/$TARGET/*/libgcc.a \
-              "$PREFIX/$TARGET/lib/libstdc++.a" \
-              "$PREFIX/$TARGET/lib/libcygwin.a" \
-              "$PREFIX/bin/cygwin1.dll" ; do
-              if [ -f "$f" ]; then
-                printf '%-14s %12s bytes  %s\n' "$(basename "$f")" "$(stat -c %s "$f")" "$f"
-                cp "$f" out/libs/ 2>/dev/null
-              else
-                echo "MISSING: $f"
-              fi
+            for f in "$TC"/lib/gcc/$T/*/libgcc.a "$TC/$T/lib/libstdc++.a" \
+                     "$TC/$T/lib/libcygwin.a" "$TC/bin/cygwin1.dll"; do
+              if [ -f "$f" ]; then printf '%-16s %12s bytes\n' "$(basename "$f")" "$(stat -c %s "$f")"
+              else printf '%-16s MISSING\n' "$(basename "$f")"; fi
             done
             echo
-            echo "=== libgcc symbol count ==="
-            for f in "$PREFIX"/lib/gcc/$TARGET/*/libgcc.a; do
-              [ -f "$f" ] && echo "$(basename "$f"): $("$NM" "$f" 2>/dev/null | grep -c ' T ') text symbols"
-            done
-            echo
-            echo "=== unwinder model (SEH vs SjLj) ==="
-            for f in "$PREFIX"/lib/gcc/$TARGET/*/libgcc.a; do
+            echo "=== unwinder model in libgcc ==="
+            for f in "$TC"/lib/gcc/$T/*/libgcc.a; do
               [ -f "$f" ] || continue
-              echo "  _Unwind_SjLj_*: $("$NM" "$f" 2>/dev/null | grep -c '_Unwind_SjLj_')"
-              echo "  _Unwind_RaiseException: $("$NM" "$f" 2>/dev/null | grep -c 'T _Unwind_RaiseException')"
+              echo "  _Unwind_SjLj_*:         $("$TC/bin/$T-nm" "$f" 2>/dev/null | grep -c '_Unwind_SjLj_')"
+              echo "  _Unwind_RaiseException: $("$TC/bin/$T-nm" "$f" 2>/dev/null | grep -c 'T _Unwind_RaiseException')"
             done
-            echo
-            echo "=== cygwin1.dll header ==="
-            [ -f "$PREFIX/bin/cygwin1.dll" ] && "$OD" -f "$PREFIX/bin/cygwin1.dll" 2>/dev/null | head -12
           } > out/MANIFEST.txt 2>&1
           cat out/MANIFEST.txt
-
-          cp gcc-build/config.log      out/logs/gcc-config.log      2>/dev/null
-          cp gcc-stage1/config.log     out/logs/gcc-stage1-config.log 2>/dev/null
-          cp cygwin-build/config.log   out/logs/cygwin-config.log   2>/dev/null
           df -h / | tail -1 > out/logs/disk.txt
           exit 0
 
@@ -253,47 +122,27 @@ jobs:
         if: always()
         run: |
           set +e
+          TC="$HOME/cross-${ARCH}-${PLATFORM}-${CRT}"
+          T="${ARCH}-${PLATFORM}"
           mkdir -p sysroot-out
-          cd "$PREFIX"
+          [ -d "$TC" ] || { echo "no toolchain produced"; exit 0; }
+          cd "$TC"
           paths=""
-          for p in "$TARGET/include" "$TARGET/lib" "lib/gcc/$TARGET" "bin/cygwin1.dll"; do
+          for p in "$T/include" "$T/lib" "lib/gcc/$T" "bin/cygwin1.dll"; do
             [ -e "$p" ] && paths="$paths $p"
           done
-          if [ -z "$paths" ]; then
-            echo "nothing to package, the bootstrap did not get far enough"
-            exit 0
-          fi
-
-          {
-            echo "aarch64-pc-cygwin sysroot"
-            echo
-            echo "Built by the cygwin-target-libraries workflow from:"
-            echo "  gcc:      $(git -C "$GITHUB_WORKSPACE/gcc" rev-parse HEAD)"
-            echo "  binutils: ${{ steps.rev.outputs.binutils }}"
-            echo "  cygwin:   ${{ steps.rev.outputs.cygwin }}"
-            echo
-            echo "Unpack over the --prefix of a matching cross toolchain:"
-            echo "  tar -C \$PREFIX -xzf sysroot-$TARGET.tar.gz"
-            echo
-            echo "Then configure GCC with:"
-            echo "  --target=$TARGET --with-sysroot=\$PREFIX"
-            echo
-            echo "Contents:"
-          } > "$GITHUB_WORKSPACE/sysroot-out/README.txt"
-          du -sh $paths >> "$GITHUB_WORKSPACE/sysroot-out/README.txt" 2>&1
-
-          tar -czf "$GITHUB_WORKSPACE/sysroot-out/sysroot-$TARGET.tar.gz" $paths
+          [ -z "$paths" ] && { echo "nothing to package"; exit 0; }
+          tar -czf "$GITHUB_WORKSPACE/sysroot-out/sysroot-$T.tar.gz" $paths
           cd "$GITHUB_WORKSPACE"
-          sha256sum "sysroot-out/sysroot-$TARGET.tar.gz" > "sysroot-out/sysroot-$TARGET.tar.gz.sha256"
+          sha256sum "sysroot-out/sysroot-$T.tar.gz" > "sysroot-out/sysroot-$T.tar.gz.sha256"
           ls -la sysroot-out/
-          cat sysroot-out/README.txt
           exit 0
 
       - name: Upload the sysroot
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: sysroot-${{ env.TARGET }}
+          name: sysroot-aarch64-pc-cygwin
           path: sysroot-out/
           if-no-files-found: warn
           compression-level: 0
@@ -302,10 +151,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: target-libraries-${{ env.TARGET }}
+          name: build-manifest
           path: out/
           if-no-files-found: warn
-
-      - name: ccache statistics
-        if: always()
-        run: ccache -s | head -12
