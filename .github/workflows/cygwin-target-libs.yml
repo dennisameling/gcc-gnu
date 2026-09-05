@@ -143,11 +143,27 @@ jobs:
         run: |
           export PATH="$PREFIX/bin:$PATH"
           mkdir mingw-crt-build && cd mingw-crt-build
+          # --enable-w32api is required here as well as for the headers: with it
+          # the headers land in include/w32api, and without it the CRT build
+          # cannot find direct.h and friends.  The arm64 lib selection and the
+          # msvcrt default mirror the mingw-woarm64 build scripts.
           ../mingw-src/mingw-w64-crt/configure \
             --prefix="$PREFIX/$TARGET" \
             --build="$(gcc -dumpmachine)" \
-            --host="$TARGET"
-          make -j"$(nproc)" && make install
+            --host="$TARGET" \
+            --disable-lib32 --disable-lib64 --disable-libarm32 --enable-libarm64 \
+            --enable-w32api \
+            --with-default-msvcrt=msvcrt
+          make -j"$(nproc)"
+          make install
+          # Cygwin expects the w32api import libraries visible directly in
+          # $TARGET/lib, not only under w32api/.
+          cd "$PREFIX/$TARGET/lib"
+          for l in kernel32 user32 advapi32 shell32 gdi32 comdlg32 ntdll \
+                   netapi32 psapi userenv dbghelp onecore pdh winmm; do
+            [ -f "w32api/lib$l.a" ] && ln -fs "w32api/lib$l.a" . || true
+          done
+          ls -1 lib*.a 2>/dev/null | head -10
 
       - name: 6. Cygwin, stage 1
         run: |
