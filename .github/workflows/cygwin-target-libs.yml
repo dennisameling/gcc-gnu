@@ -43,6 +43,8 @@ jobs:
       BINUTILS_REF: aarch64-pc-cygwin
       CYGWIN_REPO: https://github.com/eukarpov/cygwin-windows-arm64.git
       CYGWIN_REF: woarm64
+      MINGW_REPO: https://github.com/Windows-on-ARM-Experiments/mingw-woarm64.git
+      MINGW_REF: woarm64
       PREFIX: ${{ github.workspace }}/toolchain
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 2G
@@ -103,10 +105,71 @@ jobs:
           make -j"$(nproc)"
           make install
 
-      - name: 2. Configure and build GCC stage 1
+      - name: 2. MinGW-w64 headers (w32api)
         run: |
-          # Only $PREFIX/bin on PATH.  $PREFIX/$TARGET/bin holds unprefixed
-          # as/ld which would shadow the host assembler.
+          export PATH="$PREFIX/bin:$PATH"
+          git clone --depth=1 --branch "$MINGW_REF" "$MINGW_REPO" mingw-src
+          mkdir mingw-headers-build && cd mingw-headers-build
+          ../mingw-src/mingw-w64-headers/configure \
+            --prefix="$PREFIX/$TARGET" \
+            --build="$(../mingw-src/mingw-w64-headers/config.guess 2>/dev/null || gcc -dumpmachine)" \
+            --host="$TARGET" \
+            --enable-sdk=all --enable-w32api
+          make -j"$(nproc)" && make install
+          test -f "$PREFIX/$TARGET/include/windows.h" \
+            || test -f "$PREFIX/$TARGET/include/w32api/windows.h" \
+            || { echo "windows.h not installed"; exit 1; }
+
+      - name: 3. Cygwin headers
+        run: |
+          git clone --depth=1 --branch "$CYGWIN_REF" "$CYGWIN_REPO" cygwin-src
+          mkdir -p "$PREFIX/$TARGET/include"
+          cp -r cygwin-src/newlib/libc/include/*      "$PREFIX/$TARGET/include/"
+          cp -r cygwin-src/winsup/cygwin/include/*    "$PREFIX/$TARGET/include/"
+          test -f "$PREFIX/$TARGET/include/cygwin/config.h"
+          echo "headers in sysroot: $(find "$PREFIX/$TARGET/include" -name '*.h' | wc -l)"
+
+      - name: 4. GCC stage 1 (compiler only, --without-headers)
+        run: |
+          export PATH="$PREFIX/bin:$PATH"
+          mkdir gcc-stage1 && cd gcc-stage1
+          ../gcc/configure \
+            --target="$TARGET" --prefix="$PREFIX" \
+            --enable-languages=c,c++ \
+            --enable-static --disable-shared --disable-bootstrap --disable-multilib \
+            --disable-plugins --disable-gcov --disable-libatomic --disable-libgomp \
+            --disable-libvtv --disable-libquadmath --disable-libssp --disable-nls \
+            --with-gnu-as --with-gnu-ld --without-headers \
+            CC="ccache gcc" CXX="ccache g++"
+          make -j"$(nproc)" all-gcc
+          make install-gcc
+
+      - name: 5. MinGW-w64 CRT
+        run: |
+          export PATH="$PREFIX/bin:$PATH"
+          mkdir mingw-crt-build && cd mingw-crt-build
+          ../mingw-src/mingw-w64-crt/configure \
+            --prefix="$PREFIX/$TARGET" \
+            --build="$(gcc -dumpmachine)" \
+            --host="$TARGET"
+          make -j"$(nproc)" && make install
+
+      - name: 6. Cygwin, stage 1
+        run: |
+          export PATH="$PREFIX/bin:$PATH"
+          mkdir cygwin-build && cd cygwin-build
+          ../cygwin-src/configure \
+            --prefix="$PREFIX" \
+            --build="$(gcc -dumpmachine)" --host="$(gcc -dumpmachine)" --target="$TARGET" \
+            --enable-shared --enable-static --disable-doc --disable-dumper \
+            --with-sysroot="$PREFIX" --with-build-sysroot="$PREFIX" \
+            --with-cross-bootstrap --disable-cygserver --disable-utils
+          make -j"$(nproc)" CFLAGS_FOR_TARGET="-Wno-error" \
+            CXXFLAGS_FOR_TARGET="-Wno-error -Wno-narrowing -std=gnu++17"
+          make install
+
+      - name: 7. Full GCC (libgcc and libstdc++)
+        run: |
           export PATH="$PREFIX/bin:$PATH"
           mkdir gcc-build && cd gcc-build
           ../gcc/configure \
@@ -114,69 +177,12 @@ jobs:
             --enable-languages=c,c++ \
             --disable-bootstrap --disable-multilib --disable-nls \
             --enable-threads=posix --disable-shared \
+            --with-sysroot="$PREFIX" \
             CC="ccache gcc" CXX="ccache g++"
-          make -j"$(nproc)" all-gcc
-          make install-gcc
-
-      - name: 3. Cygwin cross-bootstrap (headers and libcygwin)
-        run: |
-          export PATH="$PREFIX/bin:$PATH"
-          git clone --depth=1 --branch "$CYGWIN_REF" "$CYGWIN_REPO" cygwin-src
-          mkdir cygwin-build && cd cygwin-build
-          ../cygwin-src/configure \
-            --prefix="$PREFIX" \
-            --build="$(../cygwin-src/config.guess)" \
-            --host="$(../cygwin-src/config.guess)" \
-            --target="$TARGET" \
-            --enable-shared --enable-static \
-            --disable-doc --disable-dumper \
-            --with-sysroot="$PREFIX" --with-build-sysroot="$PREFIX" \
-            --with-cross-bootstrap --disable-cygserver --disable-utils
-          make -j"$(nproc)" CFLAGS_FOR_TARGET="-Wno-error" \
-            CXXFLAGS_FOR_TARGET="-Wno-error -Wno-narrowing -std=gnu++17"
-          make install
-
-      - name: 3b. Install the Cygwin public headers into the sysroot
-        run: |
-          set -e
-          inc="$PREFIX/$TARGET/include"
-          # Step 3 builds newlib only: winsup cannot link without libgcc, which
-          # does not exist yet.  But newlib's own sys/config.h does
-          # "#include <cygwin/config.h>" under __CYGWIN__, so libgcc cannot
-          # compile until winsup's public headers are in the sysroot.  Break the
-          # cycle by installing just the headers, which need no compiler.
-          wd=$(find cygwin-build -type d -path '*/winsup/cygwin' -print -quit 2>/dev/null || true)
-          if [ -n "$wd" ] && [ -f "$wd/Makefile" ]; then
-            make -C "$wd" install-headers || true
-          fi
-          if [ ! -f "$inc/cygwin/config.h" ]; then
-            echo "winsup install-headers unavailable, copying the shipped headers"
-            ( cd cygwin-src/winsup/cygwin/include
-              find . -type d -print | while read -r d; do mkdir -p "$inc/$d"; done
-              find . -name '*.h' -print | while read -r f; do cp "$f" "$inc/$f"; done )
-          fi
-          test -f "$inc/cygwin/config.h" || { echo "cygwin/config.h still missing"; exit 1; }
-          echo "cygwin/ headers in sysroot: $(find "$inc/cygwin" -name '*.h' | wc -l)"
-          echo "total headers in sysroot:   $(find "$inc" -name '*.h' | wc -l)"
-
-      - name: 4. Build libgcc (exercises the libgcc/config.host hunk)
-        run: |
-          export PATH="$PREFIX/bin:$PATH"
-          make -C gcc-build -j"$(nproc)" all-target-libgcc
-          make -C gcc-build install-target-libgcc
-
-      - name: 5. Rebuild Cygwin with libgcc available
-        run: |
-          export PATH="$PREFIX/bin:$PATH"
-          make -C cygwin-build -j"$(nproc)" CFLAGS_FOR_TARGET="-Wno-error" \
-            CXXFLAGS_FOR_TARGET="-Wno-error -Wno-narrowing -std=gnu++17"
-          make -C cygwin-build install
-
-      - name: 6. Build libstdc++
-        run: |
-          export PATH="$PREFIX/bin:$PATH"
-          make -C gcc-build -j"$(nproc)" all-target-libstdc++-v3
-          make -C gcc-build install-target-libstdc++-v3
+          make -j"$(nproc)" all-target-libgcc
+          make install-target-libgcc
+          make -j"$(nproc)" all-target-libstdc++-v3
+          make install-target-libstdc++-v3
 
       - name: Collect results
         if: always()
@@ -227,6 +233,7 @@ jobs:
           cat out/MANIFEST.txt
 
           cp gcc-build/config.log      out/logs/gcc-config.log      2>/dev/null
+          cp gcc-stage1/config.log     out/logs/gcc-stage1-config.log 2>/dev/null
           cp cygwin-build/config.log   out/logs/cygwin-config.log   2>/dev/null
           df -h / | tail -1 > out/logs/disk.txt
           exit 0
