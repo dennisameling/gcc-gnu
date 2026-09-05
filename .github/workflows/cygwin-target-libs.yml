@@ -1,0 +1,217 @@
+# Cold bootstrap of the aarch64-pc-cygwin target libraries.
+#
+# NOT FOR UPSTREAM SUBMISSION.
+#
+# The sibling cygwin-cross workflow stops at "make all-gcc", which never
+# touches libgcc or libstdc++ and so never exercises the libgcc/config.host
+# hunk in the "Add aarch64-pc-cygwin target" patch.  This workflow does the
+# full cross bootstrap from nothing:
+#
+#   1. binutils for the target
+#   2. GCC stage 1 (compiler only, no target libraries)
+#   3. Cygwin, cross-bootstrap mode, to lay down headers and libcygwin
+#   4. libgcc, the first real test of the config.host hunk
+#   5. Cygwin again, now that libgcc exists, for a complete cygwin1.dll
+#   6. libstdc++
+#
+# Every local build so far reused a sysroot from the older GCC 15 stack, so
+# this is the first genuinely cold bootstrap of the series.
+
+name: cygwin target libraries
+
+on:
+  push:
+    branches:
+      - ci-target-libraries
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    name: aarch64-pc-cygwin target libraries
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 330
+    env:
+      TARGET: aarch64-pc-cygwin
+      BINUTILS_REPO: https://github.com/dennisameling/binutils-gdb.git
+      BINUTILS_REF: aarch64-pc-cygwin
+      CYGWIN_REPO: https://github.com/eukarpov/cygwin-windows-arm64.git
+      CYGWIN_REF: woarm64
+      PREFIX: ${{ github.workspace }}/toolchain
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+
+    steps:
+      - name: Check out GCC
+        uses: actions/checkout@v7
+        with:
+          path: gcc
+          fetch-depth: 10
+
+      - name: Show disk before
+        run: df -h / | tail -1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache flex bison texinfo gperf \
+            libgmp-dev libmpfr-dev libmpc-dev zlib1g-dev \
+            autoconf automake libtool patch xz-utils perl
+
+      - name: Resolve source revisions
+        id: rev
+        run: |
+          bu=$(git ls-remote "$BINUTILS_REPO" "refs/heads/$BINUTILS_REF" | cut -f1)
+          cy=$(git ls-remote "$CYGWIN_REPO"  "refs/heads/$CYGWIN_REF"  | cut -f1)
+          test -n "$bu" && test -n "$cy"
+          echo "binutils=$bu" >> "$GITHUB_OUTPUT"
+          echo "cygwin=$cy"   >> "$GITHUB_OUTPUT"
+          echo "binutils $bu"
+          echo "cygwin   $cy"
+
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-libs-${{ github.sha }}
+          restore-keys: |
+            ccache-libs-
+
+      - name: Cache target binutils
+        id: binutils-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.PREFIX }}
+          key: binutils-libs-${{ env.TARGET }}-${{ steps.rev.outputs.binutils }}
+
+      - name: 1. Build binutils
+        if: steps.binutils-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 --branch "$BINUTILS_REF" "$BINUTILS_REPO" binutils-src
+          mkdir binutils-build && cd binutils-build
+          ../binutils-src/configure --target="$TARGET" --prefix="$PREFIX" \
+            --disable-nls --disable-werror --disable-sim \
+            --disable-gdb --disable-gdbserver \
+            CC="ccache gcc" CXX="ccache g++"
+          make -j"$(nproc)"
+          make install
+
+      - name: 2. Configure and build GCC stage 1
+        run: |
+          # Only $PREFIX/bin on PATH.  $PREFIX/$TARGET/bin holds unprefixed
+          # as/ld which would shadow the host assembler.
+          export PATH="$PREFIX/bin:$PATH"
+          mkdir gcc-build && cd gcc-build
+          ../gcc/configure \
+            --target="$TARGET" --prefix="$PREFIX" \
+            --enable-languages=c,c++ \
+            --disable-bootstrap --disable-multilib --disable-nls \
+            --enable-threads=posix --disable-shared \
+            CC="ccache gcc" CXX="ccache g++"
+          make -j"$(nproc)" all-gcc
+          make install-gcc
+
+      - name: 3. Cygwin cross-bootstrap (headers and libcygwin)
+        run: |
+          export PATH="$PREFIX/bin:$PATH"
+          git clone --depth=1 --branch "$CYGWIN_REF" "$CYGWIN_REPO" cygwin-src
+          mkdir cygwin-build && cd cygwin-build
+          ../cygwin-src/configure \
+            --prefix="$PREFIX" \
+            --build="$(../cygwin-src/config.guess)" \
+            --host="$(../cygwin-src/config.guess)" \
+            --target="$TARGET" \
+            --enable-shared --enable-static \
+            --disable-doc --disable-dumper \
+            --with-sysroot="$PREFIX" --with-build-sysroot="$PREFIX" \
+            --with-cross-bootstrap --disable-cygserver --disable-utils
+          make -j"$(nproc)" CFLAGS_FOR_TARGET="-Wno-error" \
+            CXXFLAGS_FOR_TARGET="-Wno-error -Wno-narrowing -std=gnu++17"
+          make install
+
+      - name: 4. Build libgcc (exercises the libgcc/config.host hunk)
+        run: |
+          export PATH="$PREFIX/bin:$PATH"
+          make -C gcc-build -j"$(nproc)" all-target-libgcc
+          make -C gcc-build install-target-libgcc
+
+      - name: 5. Rebuild Cygwin with libgcc available
+        run: |
+          export PATH="$PREFIX/bin:$PATH"
+          make -C cygwin-build -j"$(nproc)" CFLAGS_FOR_TARGET="-Wno-error" \
+            CXXFLAGS_FOR_TARGET="-Wno-error -Wno-narrowing -std=gnu++17"
+          make -C cygwin-build install
+
+      - name: 6. Build libstdc++
+        run: |
+          export PATH="$PREFIX/bin:$PATH"
+          make -C gcc-build -j"$(nproc)" all-target-libstdc++-v3
+          make -C gcc-build install-target-libstdc++-v3
+
+      - name: Collect results
+        if: always()
+        run: |
+          set +e
+          mkdir -p out/logs out/libs
+          {
+            echo "target:   $TARGET"
+            echo "gcc:      $(git -C gcc rev-parse HEAD)"
+            echo "binutils: ${{ steps.rev.outputs.binutils }}"
+            echo "cygwin:   ${{ steps.rev.outputs.cygwin }}"
+            echo "runner:   $(uname -srm)"
+          } > out/REVISIONS.txt
+          git -C gcc log --oneline -10 > out/COMMITS.txt
+
+          NM="$PREFIX/bin/$TARGET-nm"
+          OD="$PREFIX/bin/$TARGET-objdump"
+          {
+            echo "=== artefacts ==="
+            for f in \
+              "$PREFIX"/lib/gcc/$TARGET/*/libgcc.a \
+              "$PREFIX/$TARGET/lib/libstdc++.a" \
+              "$PREFIX/$TARGET/lib/libcygwin.a" \
+              "$PREFIX/bin/cygwin1.dll" ; do
+              if [ -f "$f" ]; then
+                printf '%-14s %12s bytes  %s\n' "$(basename "$f")" "$(stat -c %s "$f")" "$f"
+                cp "$f" out/libs/ 2>/dev/null
+              else
+                echo "MISSING: $f"
+              fi
+            done
+            echo
+            echo "=== libgcc symbol count ==="
+            for f in "$PREFIX"/lib/gcc/$TARGET/*/libgcc.a; do
+              [ -f "$f" ] && echo "$(basename "$f"): $("$NM" "$f" 2>/dev/null | grep -c ' T ') text symbols"
+            done
+            echo
+            echo "=== unwinder model (SEH vs SjLj) ==="
+            for f in "$PREFIX"/lib/gcc/$TARGET/*/libgcc.a; do
+              [ -f "$f" ] || continue
+              echo "  _Unwind_SjLj_*: $("$NM" "$f" 2>/dev/null | grep -c '_Unwind_SjLj_')"
+              echo "  _Unwind_RaiseException: $("$NM" "$f" 2>/dev/null | grep -c 'T _Unwind_RaiseException')"
+            done
+            echo
+            echo "=== cygwin1.dll header ==="
+            [ -f "$PREFIX/bin/cygwin1.dll" ] && "$OD" -f "$PREFIX/bin/cygwin1.dll" 2>/dev/null | head -12
+          } > out/MANIFEST.txt 2>&1
+          cat out/MANIFEST.txt
+
+          cp gcc-build/config.log      out/logs/gcc-config.log      2>/dev/null
+          cp cygwin-build/config.log   out/logs/cygwin-config.log   2>/dev/null
+          df -h / | tail -1 > out/logs/disk.txt
+          exit 0
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: target-libraries-${{ env.TARGET }}
+          path: out/
+          if-no-files-found: warn
+
+      - name: ccache statistics
+        if: always()
+        run: ccache -s | head -12
