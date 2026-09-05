@@ -8,12 +8,14 @@
 # in the "Add aarch64-pc-cygwin target" patch, which is where two real bugs
 # were found by hand.
 #
-# Rather than reimplement the bootstrap, run
-# Windows-on-ARM-Experiments/mingw-woarm64-build, which is the pipeline that
-# produced the known-good toolchain, and override only the two sources under
-# test.  GCC and binutils come from this fork's branches; mingw-w64 and
-# Cygwin keep their known-good upstream pins, so a green run is evidence
-# about the GCC and binutils patches specifically.
+# Rather than reimplement the bootstrap, run the gnu-toolchain-windows-arm64
+# build system and override only the two sources under test.  GCC and
+# binutils come from this fork's branches; mingw-w64 and Cygwin keep the
+# build system's own pins, so a green run is evidence about the GCC and
+# binutils patches specifically.
+#
+# It runs from a branch of our fork of that build system, because its
+# Cygwin autogen fixup only applies against one specific autoconf release.
 
 name: cygwin target libraries
 
@@ -46,7 +48,8 @@ jobs:
       GCC_BRANCH: aarch64-cygwin-trunk
       BINUTILS_REPO: dennisameling/binutils-gdb
       BINUTILS_BRANCH: aarch64-pc-cygwin
-      # MINGW_REPO and CYGWIN_REPO deliberately left at their defaults.
+      # MINGW_REPO and CYGWIN_REPO deliberately left at the build
+      # system's own defaults, which are a self-consistent set.
 
       # Build-system behaviour.
       RUN_BOOTSTRAP: 1      # install apt dependencies
@@ -60,7 +63,8 @@ jobs:
       - name: Check out the build system
         uses: actions/checkout@v7
         with:
-          repository: Windows-on-ARM-Experiments/mingw-woarm64-build
+          repository: dennisameling/gnu-toolchain-windows-arm64
+          ref: fix-autogen-patch-portability
           path: build-system
           fetch-depth: 1
 
