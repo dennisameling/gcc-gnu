@@ -86,16 +86,11 @@ jobs:
           restore-keys: |
             ccache-libs-
 
-      - name: Cache target binutils
-        id: binutils-cache
-        uses: actions/cache@v6
-        with:
-          path: ${{ env.PREFIX }}
-          key: binutils-libs-${{ env.TARGET }}-${{ steps.rev.outputs.binutils }}
-
       - name: 1. Build binutils
-        if: steps.binutils-cache.outputs.cache-hit != 'true'
         run: |
+          # Deliberately not cached.  Caching $PREFIX would persist the whole
+          # evolving sysroot between runs and make the bootstrap non-hermetic;
+          # ccache already makes the recompile cheap.
           git clone --depth=1 --branch "$BINUTILS_REF" "$BINUTILS_REPO" binutils-src
           mkdir binutils-build && cd binutils-build
           ../binutils-src/configure --target="$TARGET" --prefix="$PREFIX" \
