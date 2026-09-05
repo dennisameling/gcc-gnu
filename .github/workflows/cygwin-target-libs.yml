@@ -188,7 +188,7 @@ jobs:
             --enable-languages=c,c++ \
             --disable-bootstrap --disable-multilib --disable-nls \
             --enable-threads=posix --disable-shared \
-            --with-sysroot="$PREFIX" \
+            --with-gnu-as --with-gnu-ld \
             CC="ccache gcc" CXX="ccache g++"
           make -j"$(nproc)" all-target-libgcc
           make install-target-libgcc
