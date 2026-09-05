@@ -136,6 +136,29 @@ jobs:
             CXXFLAGS_FOR_TARGET="-Wno-error -Wno-narrowing -std=gnu++17"
           make install
 
+      - name: 3b. Install the Cygwin public headers into the sysroot
+        run: |
+          set -e
+          inc="$PREFIX/$TARGET/include"
+          # Step 3 builds newlib only: winsup cannot link without libgcc, which
+          # does not exist yet.  But newlib's own sys/config.h does
+          # "#include <cygwin/config.h>" under __CYGWIN__, so libgcc cannot
+          # compile until winsup's public headers are in the sysroot.  Break the
+          # cycle by installing just the headers, which need no compiler.
+          wd=$(find cygwin-build -type d -path '*/winsup/cygwin' -print -quit 2>/dev/null || true)
+          if [ -n "$wd" ] && [ -f "$wd/Makefile" ]; then
+            make -C "$wd" install-headers || true
+          fi
+          if [ ! -f "$inc/cygwin/config.h" ]; then
+            echo "winsup install-headers unavailable, copying the shipped headers"
+            ( cd cygwin-src/winsup/cygwin/include
+              find . -type d -print | while read -r d; do mkdir -p "$inc/$d"; done
+              find . -name '*.h' -print | while read -r f; do cp "$f" "$inc/$f"; done )
+          fi
+          test -f "$inc/cygwin/config.h" || { echo "cygwin/config.h still missing"; exit 1; }
+          echo "cygwin/ headers in sysroot: $(find "$inc/cygwin" -name '*.h' | wc -l)"
+          echo "total headers in sysroot:   $(find "$inc" -name '*.h' | wc -l)"
+
       - name: 4. Build libgcc (exercises the libgcc/config.host hunk)
         run: |
           export PATH="$PREFIX/bin:$PATH"
