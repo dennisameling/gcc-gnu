@@ -28,6 +28,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: target-libs-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   bootstrap:
     name: aarch64-pc-cygwin target libraries
@@ -203,6 +207,55 @@ jobs:
           cp cygwin-build/config.log   out/logs/cygwin-config.log   2>/dev/null
           df -h / | tail -1 > out/logs/disk.txt
           exit 0
+
+      - name: Package the sysroot
+        if: always()
+        run: |
+          set +e
+          mkdir -p sysroot-out
+          cd "$PREFIX"
+          paths=""
+          for p in "$TARGET/include" "$TARGET/lib" "lib/gcc/$TARGET" "bin/cygwin1.dll"; do
+            [ -e "$p" ] && paths="$paths $p"
+          done
+          if [ -z "$paths" ]; then
+            echo "nothing to package, the bootstrap did not get far enough"
+            exit 0
+          fi
+
+          {
+            echo "aarch64-pc-cygwin sysroot"
+            echo
+            echo "Built by the cygwin-target-libraries workflow from:"
+            echo "  gcc:      $(git -C "$GITHUB_WORKSPACE/gcc" rev-parse HEAD)"
+            echo "  binutils: ${{ steps.rev.outputs.binutils }}"
+            echo "  cygwin:   ${{ steps.rev.outputs.cygwin }}"
+            echo
+            echo "Unpack over the --prefix of a matching cross toolchain:"
+            echo "  tar -C \$PREFIX -xzf sysroot-$TARGET.tar.gz"
+            echo
+            echo "Then configure GCC with:"
+            echo "  --target=$TARGET --with-sysroot=\$PREFIX"
+            echo
+            echo "Contents:"
+          } > "$GITHUB_WORKSPACE/sysroot-out/README.txt"
+          du -sh $paths >> "$GITHUB_WORKSPACE/sysroot-out/README.txt" 2>&1
+
+          tar -czf "$GITHUB_WORKSPACE/sysroot-out/sysroot-$TARGET.tar.gz" $paths
+          cd "$GITHUB_WORKSPACE"
+          sha256sum "sysroot-out/sysroot-$TARGET.tar.gz" > "sysroot-out/sysroot-$TARGET.tar.gz.sha256"
+          ls -la sysroot-out/
+          cat sysroot-out/README.txt
+          exit 0
+
+      - name: Upload the sysroot
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sysroot-${{ env.TARGET }}
+          path: sysroot-out/
+          if-no-files-found: warn
+          compression-level: 0
 
       - name: Upload results
         if: always()
