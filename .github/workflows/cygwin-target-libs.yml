@@ -48,13 +48,8 @@ jobs:
       GCC_BRANCH: aarch64-cygwin-trunk
       BINUTILS_REPO: dennisameling/binutils-gdb
       BINUTILS_BRANCH: aarch64-pc-cygwin
-      # mingw-w64 carries one fix that is not upstream yet: the
-      # calling-convention macros are guarded on _ARM_ but not _ARM64_, so
-      # CALLBACK and WINAPI resolve to __stdcall on aarch64 and winsup
-      # fails to build under -Werror.
-      MINGW_REPO: dennisameling/mingw-windows-arm64
-      MINGW_BRANCH: aarch64-calling-convention-macros
-      # CYGWIN_REPO left at the build system's own default.
+      # MINGW_REPO and CYGWIN_REPO deliberately left at the build
+      # system's own defaults, which are a self-consistent set.
 
       # Build-system behaviour.
       RUN_BOOTSTRAP: 1      # install apt dependencies
