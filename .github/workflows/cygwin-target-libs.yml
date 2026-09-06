@@ -62,6 +62,9 @@ jobs:
       FLAT_CLONE: 1
       CCACHE: 1
       DELETE_BUILD: 1       # runners only have ~14 GB of disk
+      # Pin the install prefix.  The build system otherwise derives it, and
+      # the collect steps looked in the wrong place.
+      TOOLCHAIN_PATH: ${{ github.workspace }}/toolchain
 
     steps:
       - name: Check out the build system
@@ -99,7 +102,7 @@ jobs:
         if: always()
         run: |
           set +e
-          TC="$HOME/cross-${ARCH}-${PLATFORM}-${CRT}"
+          TC="$TOOLCHAIN_PATH"
           T="${ARCH}-${PLATFORM}"
           mkdir -p out/logs
           {
@@ -130,7 +133,7 @@ jobs:
         if: always()
         run: |
           set +e
-          TC="$HOME/cross-${ARCH}-${PLATFORM}-${CRT}"
+          TC="$TOOLCHAIN_PATH"
           T="${ARCH}-${PLATFORM}"
           mkdir -p sysroot-out
           [ -d "$TC" ] || { echo "no toolchain produced"; exit 0; }
