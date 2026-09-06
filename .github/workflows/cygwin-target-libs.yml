@@ -24,6 +24,11 @@ on:
     branches:
       - ci-target-libraries
   workflow_dispatch:
+    inputs:
+      gcc_branch:
+        description: "GCC branch to build"
+        required: false
+        default: aarch64-cygwin-trunk
 
 permissions:
   contents: read
@@ -45,7 +50,7 @@ jobs:
 
       # The two things under test.
       GCC_REPO: dennisameling/gcc-gnu
-      GCC_BRANCH: aarch64-cygwin-trunk
+      GCC_BRANCH: ${{ inputs.gcc_branch || 'aarch64-cygwin-trunk' }}
       BINUTILS_REPO: dennisameling/binutils-gdb
       # Build against the target patch plus a revert of upstream 534e9a794
       # "PE+: Remove the stdcall fixup machinery", which lands on 2026-09-04
