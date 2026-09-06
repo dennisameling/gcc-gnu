@@ -47,7 +47,11 @@ jobs:
       GCC_REPO: dennisameling/gcc-gnu
       GCC_BRANCH: aarch64-cygwin-trunk
       BINUTILS_REPO: dennisameling/binutils-gdb
-      BINUTILS_BRANCH: aarch64-pc-cygwin
+      # Build against the target patch plus a revert of upstream 534e9a794
+      # "PE+: Remove the stdcall fixup machinery", which lands on 2026-09-04
+      # and breaks linking cygwin1.dll.  The aarch64-pc-cygwin branch carries
+      # the upstreamable patch alone, against unmodified trunk.
+      BINUTILS_BRANCH: aarch64-pc-cygwin-build
       # MINGW_REPO and CYGWIN_REPO deliberately left at the build
       # system's own defaults, which are a self-consistent set.
 
